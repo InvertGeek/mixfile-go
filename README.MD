@@ -1,7 +1,6 @@
-
 ## MixFileGo
 
-**高性能 MixFile 文件解析服务器**
+**高性能 MixFile 文件解析服务器**	
 https://github.com/InvertGeek/MixFile
 
 * **功能特性**：支持视频播放进度切换、Range 请求。
