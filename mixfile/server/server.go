@@ -141,6 +141,7 @@ func (s *MixFileServer) writeMixFile(w http.ResponseWriter, shareInfo *shareinfo
 			data, err := shareInfo.DoFetchFile(s.HttpClient, u, referer)
 
 			if err != nil {
+			    fmt.Println("发生错误: ", err)
 				select {
 				case errChan <- err:
 				default:
