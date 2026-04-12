@@ -2,56 +2,49 @@ package basen
 
 import (
 	"math/big"
+	"strings"
 )
 
-const alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-var base = big.NewInt(int64(len(alphabet)))
-
-// 编码
+// Encode 极简版：利用 big.Int 内置的 Text 方法
 func Encode(data []byte) string {
-	x := new(big.Int).SetBytes(data)
-
-	if x.Cmp(big.NewInt(0)) == 0 {
-		return string(alphabet[0])
+	if len(data) == 0 {
+		return ""
 	}
 
-	result := make([]byte, 0)
-
-	mod := new(big.Int)
-
-	for x.Cmp(big.NewInt(0)) > 0 {
-		x.DivMod(x, base, mod)
-		result = append(result, alphabet[mod.Int64()])
+	// 统计前导零（big.Int 会丢失字节数组前面的 0x00）
+	zcount := 0
+	for zcount < len(data) && data[zcount] == 0 {
+		zcount++
 	}
 
-	// 反转
-	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
-		result[i], result[j] = result[j], result[i]
-	}
+	// big.Int.Text(62) 使用的是 0-9a-zA-Z 字符集
+	n := new(big.Int).SetBytes(data[zcount:])
+	res := n.Text(62)
 
-	return string(result)
+	// 补回前导零：在 62 进制中，'0' 对应 0x00
+	return strings.Repeat("0", zcount) + res
 }
 
-// 解码
+// Decode 极简版：利用 big.Int 内置的 SetString 方法
 func Decode(s string) []byte {
-	x := big.NewInt(0)
-
-	for _, ch := range s {
-		index := int64(-1)
-		for i, c := range alphabet {
-			if c == ch {
-				index = int64(i)
-				break
-			}
-		}
-		if index < 0 {
-			panic("invalid character")
-		}
-
-		x.Mul(x, base)
-		x.Add(x, big.NewInt(index))
+	if s == "" {
+		return []byte{}
 	}
 
-	return x.Bytes()
+	zcount := 0
+	for zcount < len(s) && s[zcount] == '0' {
+		zcount++
+	}
+
+	n := new(big.Int)
+	// SetString 支持 2-62 进制
+	n, ok := n.SetString(s[zcount:], 62)
+	if !ok {
+		return nil
+	}
+
+	payload := n.Bytes()
+	res := make([]byte, zcount+len(payload))
+	copy(res[zcount:], payload)
+	return res
 }
