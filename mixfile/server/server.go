@@ -122,33 +122,27 @@ func (s *MixFileServer) writeMixFile(w http.ResponseWriter, shareInfo *shareinfo
 	var wg sync.WaitGroup
 
 	for i, fileRange := range fileList {
-		order := i
-		targetURL := fileRange.URL
-		offset := fileRange.Offset
-
-		if !st.Acquire() {
-			// 序列已中止（某个分片失败），停止提交新任务
+		// 同步预占槽位并占位，保证顺序（对应 Kotlin 的 prepareTask）。
+		// 返回 false 说明已有分片失败触发 Abort，停止提交。
+		if !st.PrepareTask(i) {
 			break
 		}
 		wg.Add(1)
 
 		go func(o int, u string, off int) {
 			defer wg.Done()
-			// 槽位所有权归本协程：无论下载失败、写出失败还是序列中止，
-			// 都在退出时归还，保证每次 Acquire 恰好对应一次 Release。
-			defer st.Release()
 
 			// 并发下载数据
 			data, err := shareInfo.DoFetchFile(s.HttpClient, u, referer)
 			if err != nil {
 				fmt.Println("分片下载失败: ", err)
-				// 流式顺序写出：分片失败必须整体中止，否则后续协程会永久等待序号。
+				// Go 没有结构化并发的自动取消，需显式中止以唤醒提交循环
 				st.Abort()
 				return
 			}
 
-			// 按照顺序写入 Response
-			err = st.AddAndExecute(o, func() error {
+			// 用真实任务替换占位符，再从最小序号连续冲刷写出
+			st.AddTask(o, func() error {
 				finalData, sErr := sliceByOffset(data, off)
 				if sErr != nil {
 					return sErr
@@ -156,10 +150,11 @@ func (s *MixFileServer) writeMixFile(w http.ResponseWriter, shareInfo *shareinfo
 				_, wErr := w.Write(finalData)
 				return wErr
 			})
-			//if err != nil {
-			//	fmt.Println("分片写出失败: ", err)
-			//}
-		}(order, targetURL, offset)
+			if err := st.Execute(); err != nil {
+				//fmt.Println("分片写出失败: ", err)
+				st.Abort()
+			}
+		}(i, fileRange.URL, fileRange.Offset)
 	}
 
 	wg.Wait()

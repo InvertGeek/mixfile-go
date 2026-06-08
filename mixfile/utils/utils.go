@@ -7,34 +7,37 @@ import (
 	"sync"
 )
 
+// SortedTask 对标 Kotlin 的 SortedTask：用占位符按序预占，execute 时从最小序号
+// 连续冲刷已就绪的任务，遇占位符即停。槽位从 PrepareTask 持有到任务被写出才归还，
+// 天然把在途分片数限制在 limit 个。
+//
+// 与 Kotlin 的唯一区别：Kotlin 靠结构化并发在分片下载异常时自动取消全部协程，
+// Go 没有此机制，故保留 done/Abort 用于在下载失败时唤醒阻塞的提交循环，避免死锁。
 type SortedTask struct {
-	limit     int
-	semaphore chan struct{}
-	taskMap   sync.Map
-	orders    []int
 	mu        sync.Mutex
-	cond      *sync.Cond
-	nextOrder int
-	aborted   bool
+	taskMap   map[int]func() error // nil 值表示占位符（对应 Kotlin 的 placeholder）
+	next      int
+	semaphore chan struct{}
 	done      chan struct{}
 	once      sync.Once
 }
 
 func NewSortedTask(limit int) *SortedTask {
-	st := &SortedTask{
-		limit:     limit,
+	if limit < 1 {
+		limit = 1
+	}
+	return &SortedTask{
+		taskMap:   make(map[int]func() error),
 		semaphore: make(chan struct{}, limit),
-		nextOrder: 0,
 		done:      make(chan struct{}),
 	}
-	st.cond = sync.NewCond(&st.mu)
-	return st
 }
 
-// Acquire 获取一个并发槽位。若任务序列已中止则立即返回 false，避免主循环阻塞。
-// 优先检查 done：序列已中止时绝不再占用槽位（select 多路就绪时是随机的，
-// 单独提前判断可避免中止后又误提交一个任务）。
-func (st *SortedTask) Acquire() bool {
+// PrepareTask 获取并发槽位并按序占位（对应 Kotlin 的 prepareTask）。
+// 必须在提交循环里顺序调用，以保证 taskMap 的 key 有序。
+// 序列已中止时返回 false，使提交循环及时退出，避免死锁。
+func (st *SortedTask) PrepareTask(order int) bool {
+	// 优先检查中止：select 多路就绪时是随机的，单独提前判断可避免中止后又误占一个槽位
 	select {
 	case <-st.done:
 		return false
@@ -42,63 +45,47 @@ func (st *SortedTask) Acquire() bool {
 	}
 	select {
 	case st.semaphore <- struct{}{}:
-		return true
 	case <-st.done:
 		return false
 	}
-}
-
-func (st *SortedTask) Release() {
-	<-st.semaphore
-}
-
-// Abort 标记任务序列已中止，唤醒所有正在等待序号的协程以及阻塞在 Acquire 的协程。
-// 流式顺序写出场景下，任意分片失败都应整体中断，避免写出损坏的文件。
-func (st *SortedTask) Abort() {
 	st.mu.Lock()
-	st.aborted = true
-	st.cond.Broadcast()
+	st.taskMap[order] = nil // 占位符
 	st.mu.Unlock()
-	st.once.Do(func() { close(st.done) })
+	return true
 }
 
-// AddAndExecute 将任务放入 Map，如果轮到该序号则执行并递增序号。
-// 不负责并发槽位的归还：槽位由调用方在 goroutine 中以 defer Release 统一管理，
-// 保证无论成功、写出失败还是序列中止，每个 Acquire 都恰好对应一次 Release。
-func (st *SortedTask) AddAndExecute(order int, task func() error) error {
-	st.taskMap.Store(order, task)
+// AddTask 用真实任务替换占位符（对应 Kotlin 的 addTask）。
+func (st *SortedTask) AddTask(order int, task func() error) {
+	st.mu.Lock()
+	st.taskMap[order] = task
+	st.mu.Unlock()
+}
 
+// Execute 在锁内从最小序号开始连续执行已就绪的任务，遇到占位符或缺口即停止
+// （对应 Kotlin 的 execute）。每执行一个任务归还一个槽位。
+func (st *SortedTask) Execute() error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-
 	for {
-		if st.aborted {
-			return fmt.Errorf("task sequence aborted")
+		task, ok := st.taskMap[st.next]
+		if !ok || task == nil {
+			// 不存在或仍是占位符：更靠前的分片尚未下载完，停止
+			return nil
 		}
-
-		val, ok := st.taskMap.Load(st.nextOrder)
-		if !ok {
-			// 还没轮到，或者还没准备好
-			st.cond.Wait()
-			continue
-		}
-
-		// 执行任务
-		f := val.(func() error)
-		if err := f(); err != nil {
-			// 写出失败，整体中止序列，唤醒其余等待者
-			st.aborted = true
-			st.cond.Broadcast()
-			st.once.Do(func() { close(st.done) })
+		delete(st.taskMap, st.next)
+		st.next++
+		err := task()
+		<-st.semaphore // 归还槽位（对应 Kotlin finally 中的 release）
+		if err != nil {
 			return err
 		}
-
-		st.taskMap.Delete(st.nextOrder)
-		st.nextOrder++
-		st.cond.Broadcast() // 通知其他在等待序号的协程
-		break
 	}
-	return nil
+}
+
+// Abort 中止序列，唤醒阻塞在 PrepareTask 的提交循环。
+// 下载失败时需显式调用（Kotlin 靠结构化并发自动取消，Go 没有）。
+func (st *SortedTask) Abort() {
+	st.once.Do(func() { close(st.done) })
 }
 
 // SubstringAfter 返回 delimiter 第一次出现之后的子串
