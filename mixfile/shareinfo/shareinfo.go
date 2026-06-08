@@ -80,7 +80,8 @@ func (m *MixShareInfo) DoFetchFile(
 	maxSize := int64(limit + m.HeadSize + 24)
 	if contentLength > maxSize {
 		overSize := contentLength - maxSize
-		return nil, fmt.Errorf("分片文件过大: %d bytes", overSize)
+		// 对标 Kotlin 的 NoRetryException：过大重试也没用
+		return nil, utils.NoRetry(fmt.Errorf("分片文件过大: %d bytes", overSize))
 	}
 
 	// 5. 跳过头部 (Kotlin: channel.discard)
@@ -111,7 +112,10 @@ func (m *MixShareInfo) DoFetchFile(
 
 		// 比较 Hash (不区分大小写)
 		if !strings.EqualFold(currentHash, expectedHash) {
-			return nil, fmt.Errorf("文件遭到篡改: %s != %s", currentHash, expectedHash)
+			// 能走到这里说明 GCM 解密已通过（数据完整、密钥正确），
+			// hash 仍不符即源内容本身与分享码声明不一致，重拉同一 URL 必然还不符。
+			// 传输不完整的情况会在 GCM Tag 校验阶段就失败并重试，到不了这里。
+			return nil, utils.NoRetry(fmt.Errorf("文件遭到篡改: %s != %s", currentHash, expectedHash))
 		}
 	}
 

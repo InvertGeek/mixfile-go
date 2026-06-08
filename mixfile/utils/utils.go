@@ -1,10 +1,12 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 // SortedTask 对标 Kotlin 的 SortedTask：用占位符按序预占，execute 时从最小序号
@@ -23,12 +25,9 @@ type SortedTask struct {
 }
 
 func NewSortedTask(limit int) *SortedTask {
-	if limit < 1 {
-		limit = 1
-	}
 	return &SortedTask{
 		taskMap:   make(map[int]func() error),
-		semaphore: make(chan struct{}, limit),
+		semaphore: make(chan struct{}, max(limit, 1)),
 		done:      make(chan struct{}),
 	}
 }
@@ -110,4 +109,48 @@ func FindAvailablePort(startPort int) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("no available port found")
+}
+
+// noRetryError 包裹一个不应重试的错误（对标 Kotlin 的 NoRetryException）。
+// 例如「分片过大」：重试也只会一直大，没有意义。
+type noRetryError struct{ err error }
+
+func (e *noRetryError) Error() string { return e.err.Error() }
+func (e *noRetryError) Unwrap() error { return e.err }
+
+// NoRetry 标记一个错误为不可重试。Retry 遇到被它包裹的错误会立即返回，不再重试。
+func NoRetry(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &noRetryError{err: err}
+}
+
+// IsNoRetry 判断错误链上是否存在 NoRetry 标记。
+func IsNoRetry(err error) bool {
+	var e *noRetryError
+	return errors.As(err, &e)
+}
+
+// Retry 重试 block 最多 times 次，每次失败后等待 delay（对标 Kotlin 的 retry）。
+// 被 NoRetry 标记的错误立即返回，不重试。times <= 1 时只执行一次。
+// 与 Kotlin 不同：Go 无法通过异常区分「取消」，调用方如需取消应在 block 内自行响应 ctx。
+func Retry[T any](times int, delay time.Duration, block func() (T, error)) (T, error) {
+	var result T
+	var err error
+	times = max(times, 1)
+	for i := 0; i < times; i++ {
+		result, err = block()
+		if err == nil {
+			return result, nil
+		}
+		if IsNoRetry(err) {
+			return result, err
+		}
+		// 最后一次失败不再等待
+		if i < times-1 && delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+	return result, err
 }

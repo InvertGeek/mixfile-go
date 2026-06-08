@@ -13,8 +13,17 @@ import (
 )
 
 type MixFileServer struct {
-	HttpClient        *http.Client
-	DownloadTaskCount int
+	HttpClient         *http.Client
+	DownloadTaskCount  int
+	DownloadRetryCount int // 单个分片下载失败的重试次数（对标 Kotlin downloadRetryCount）
+}
+
+// fetchWithRetry 在 DoFetchFile 外层套重试（对标 Kotlin 的 fetchFile -> retry）。
+// body 流读到一半断开等瞬时网络错误会重试；被 NoRetry 标记的错误（分片过大）立即返回。
+func (s *MixFileServer) fetchWithRetry(shareInfo *shareinfo.MixShareInfo, targetURL, referer string) ([]byte, error) {
+	return utils.Retry(s.DownloadRetryCount, 0, func() ([]byte, error) {
+		return shareInfo.DoFetchFile(s.HttpClient, targetURL, referer)
+	})
 }
 
 func (s *MixFileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +56,7 @@ func (s *MixFileServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		referer = shareInfo.Referer
 	}
 
-	mixFileBytes, err := shareInfo.DoFetchFile(s.HttpClient, shareInfo.URL, referer)
+	mixFileBytes, err := s.fetchWithRetry(shareInfo, shareInfo.URL, referer)
 	if err != nil {
 		http.Error(w, "解析文件索引失败", http.StatusInternalServerError)
 		return
@@ -108,15 +117,9 @@ func (s *MixFileServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 func (s *MixFileServer) writeMixFile(w http.ResponseWriter, shareInfo *shareinfo.MixShareInfo, mixFile *mixfile.MixFile, startRange int64, referer string) {
 	fileList := mixFile.GetFileListByStartRange(startRange)
 
-	// 计算并发数
-	chunkSizeMB := mixFile.ChunkSize / (1024 * 1024)
-	if chunkSizeMB < 1 {
-		chunkSizeMB = 1
-	}
-	taskLimit := s.DownloadTaskCount / chunkSizeMB
-	if taskLimit < 1 {
-		taskLimit = 1
-	}
+	// 计算并发数：分片越大(MB)，允许的并发分片数越少，避免内存占用过高
+	chunkSizeMB := max(mixFile.ChunkSize/(1024*1024), 1)
+	taskLimit := max(s.DownloadTaskCount/chunkSizeMB, 1)
 
 	st := utils.NewSortedTask(taskLimit)
 	var wg sync.WaitGroup
@@ -132,8 +135,8 @@ func (s *MixFileServer) writeMixFile(w http.ResponseWriter, shareInfo *shareinfo
 		go func(o int, u string, off int) {
 			defer wg.Done()
 
-			// 并发下载数据
-			data, err := shareInfo.DoFetchFile(s.HttpClient, u, referer)
+			// 并发下载数据（带重试：应对 body 流中途断开等瞬时网络错误）
+			data, err := s.fetchWithRetry(shareInfo, u, referer)
 			if err != nil {
 				fmt.Println("分片下载失败: ", err)
 				// Go 没有结构化并发的自动取消，需显式中止以唤醒提交循环

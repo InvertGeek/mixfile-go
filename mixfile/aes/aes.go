@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mixfile-go/mixfile/utils"
 )
 
 // 严格对应 Kotlin 的 GCMParameterSpec(96, iv)
@@ -98,7 +99,7 @@ func DecryptAESStream(reader io.Reader, key []byte, limit int) ([]byte, error) {
 
 	// 检查是否超过了 limit + tagSize
 	if len(encryptedData) > int(maxToRead) {
-		return nil, errors.New("分片文件过大") // 对应 NoRetryException
+		return nil, utils.NoRetry(errors.New("分片文件过大")) // 对应 NoRetryException
 	}
 
 	// 3. 执行解密并校验

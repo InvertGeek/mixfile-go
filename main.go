@@ -13,8 +13,9 @@ import (
 
 func main() {
 	ser1 := &server.MixFileServer{
-		HttpClient:        &http.Client{},
-		DownloadTaskCount: 5,
+		HttpClient:         &http.Client{},
+		DownloadTaskCount:  5,
+		DownloadRetryCount: 3,
 	}
 	fmt.Println("已启动服务器: 127.0.0.1:8080")
 	log.Fatal(http.ListenAndServe("127.0.0.1:8080", ser1))
