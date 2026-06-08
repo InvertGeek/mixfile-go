@@ -8,6 +8,7 @@ import (
 	"io"
 	"mixfile-go/mixfile/aes"
 	"mixfile-go/mixfile/basen"
+	"mixfile-go/mixfile/utils"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,8 +36,9 @@ type MixShareInfo struct {
 	CachedCode string `json:"-"` // Transient，不参与 JSON 序列化
 }
 
-// 从分享码解析
+// FromString 从分享码解析
 func FromString(code string) (*MixShareInfo, error) {
+	code = utils.SubstringAfter(code, "mf://")
 	shareInfoBytes, err := DecodeMixShareInfo(code)
 	if err != nil {
 		return nil, err
@@ -114,13 +116,4 @@ func (m *MixShareInfo) DoFetchFile(
 	}
 
 	return result, nil
-}
-
-// 辅助函数：获取 URL 里的 # 后面的内容
-func getFragmentFromURL(rawURL string) string {
-	parts := strings.Split(rawURL, "#")
-	if len(parts) > 1 {
-		return strings.TrimSpace(parts[1])
-	}
-	return ""
 }
